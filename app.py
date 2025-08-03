@@ -18,8 +18,7 @@ from dotenv import load_dotenv
 from json_repair import repair_json
 
 # Configure logging
-# logging.basicConfig(level=logging.INFO) # for dev
-logging.basicConfig(level=logging.WARNING) 
+logging.basicConfig(level=logging.INFO)  # Enable debug logging
 logger = logging.getLogger(__name__)
 
 # Load environment variables
@@ -31,6 +30,29 @@ app = FastAPI(
     description="OpenAI-compatible API for Claude Sonnet 4 via AWS CodeWhisperer",
     version="3.0.1"
 )
+
+# Add request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start_time = time.time()
+    
+    # Log incoming request details
+    logger.info("🌐 ===== INCOMING REQUEST =====")
+    logger.info(f"📍 Method: {request.method}")
+    logger.info(f"🔗 URL: {request.url}")
+    logger.info(f"📋 Headers: {dict(request.headers)}")
+    logger.info(f"🔑 Authorization header: {request.headers.get('authorization', 'NOT FOUND')}")
+    logger.info(f"📱 User-Agent: {request.headers.get('user-agent', 'NOT FOUND')}")
+    logger.info(f"🌍 Client IP: {request.client.host if request.client else 'UNKNOWN'}")
+    
+    response = await call_next(request)
+    
+    process_time = time.time() - start_time
+    logger.info(f"⏱️ Request processed in {process_time:.4f}s")
+    logger.info(f"📤 Response status: {response.status_code}")
+    logger.info("🏁 ===== REQUEST COMPLETED =====")
+    
+    return response
 
 # Configuration
 API_KEY = os.getenv("API_KEY", "ki2api-key-2024")
@@ -226,7 +248,12 @@ class ClaudeStreamEvent(BaseModel):
 
 # Authentication
 async def verify_api_key(authorization: str = Header(None)):
+    logger.info(f"🔑 API Key verification started")
+    logger.info(f"📋 Authorization header received: {authorization}")
+    logger.info(f"🎯 Expected API key: {API_KEY}")
+    
     if not authorization:
+        logger.error("❌ Authorization header is missing")
         raise HTTPException(
             status_code=401,
             detail={
@@ -240,6 +267,7 @@ async def verify_api_key(authorization: str = Header(None)):
         )
     
     if not authorization.startswith("Bearer "):
+        logger.error(f"❌ Invalid authorization format: {authorization}")
         raise HTTPException(
             status_code=401,
             detail={
@@ -253,7 +281,15 @@ async def verify_api_key(authorization: str = Header(None)):
         )
     
     api_key = authorization.replace("Bearer ", "")
+    logger.info(f"🔍 Extracted API key: '{api_key}'")
+    logger.info(f"📏 API key length: {len(api_key)}")
+    logger.info(f"📏 Expected key length: {len(API_KEY)}")
+    
     if api_key != API_KEY:
+        logger.error(f"❌ API key mismatch!")
+        logger.error(f"   Received: '{api_key}'")
+        logger.error(f"   Expected: '{API_KEY}'")
+        logger.error(f"   Are equal: {api_key == API_KEY}")
         raise HTTPException(
             status_code=401,
             detail={
@@ -265,6 +301,8 @@ async def verify_api_key(authorization: str = Header(None)):
                 }
             }
         )
+    
+    logger.info("✅ API key verification successful")
     return api_key
 
 # Token management
@@ -1922,10 +1960,16 @@ async def create_claude_message(
     api_key: str = Depends(verify_api_key)
 ):
     """Create a Claude message (Claude API compatible)"""
+    logger.info("🚀 ===== CLAUDE API REQUEST STARTED =====")
+    logger.info(f"📍 Endpoint: POST /v1/messages")
+    logger.info(f"🔑 API Key verified: {api_key}")
     logger.info(f"📥 CLAUDE REQUEST: {request.model_dump_json(indent=2)}")
+    logger.info(f"🎯 Requested model: {request.model}")
+    logger.info(f"📋 Available models: {list(MODEL_MAP.keys())}")
     
     # Validate model
     if request.model not in MODEL_MAP:
+        logger.error(f"❌ Invalid model requested: {request.model}")
         raise HTTPException(
             status_code=400,
             detail={
