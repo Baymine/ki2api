@@ -43,6 +43,11 @@ PROFILE_ARN = "arn:aws:codewhisperer:us-east-1:699475941385:profile/EHGA3GRVQMUK
 MODEL_MAP = {
     "claude-sonnet-4-20250514": "CLAUDE_SONNET_4_20250514_V1_0",
     "claude-3-5-haiku-20241022": "CLAUDE_3_7_SONNET_20250219_V1_0",
+    # Claude API compatible model names
+    "claude-3-5-sonnet-20241022": "CLAUDE_SONNET_4_20250514_V1_0",
+    "claude-3-haiku-20240307": "CLAUDE_3_7_SONNET_20250219_V1_0",
+    "claude-3-sonnet-20240229": "CLAUDE_SONNET_4_20250514_V1_0",
+    "claude-3-opus-20240229": "CLAUDE_SONNET_4_20250514_V1_0",
 }
 DEFAULT_MODEL = "claude-sonnet-4-20250514"
 
@@ -160,6 +165,65 @@ class ChatCompletionStreamResponse(BaseModel):
 class ErrorResponse(BaseModel):
     error: Dict[str, Any]
 
+# Claude API specific models
+class ClaudeContentPart(BaseModel):
+    type: str
+    text: Optional[str] = None
+    source: Optional[Dict[str, Any]] = None  # For images
+
+class ClaudeMessage(BaseModel):
+    role: str
+    content: Union[str, List[ClaudeContentPart]]
+
+class ClaudeToolDefinition(BaseModel):
+    name: str
+    description: Optional[str] = None
+    input_schema: Optional[Dict[str, Any]] = None
+
+class ClaudeToolUse(BaseModel):
+    type: str = "tool_use"
+    id: str
+    name: str
+    input: Dict[str, Any]
+
+class ClaudeToolResult(BaseModel):
+    type: str = "tool_result"
+    tool_use_id: str
+    content: Union[str, List[Dict[str, Any]]]
+
+class ClaudeRequest(BaseModel):
+    model: str
+    max_tokens: int
+    messages: List[ClaudeMessage]
+    system: Optional[str] = None
+    temperature: Optional[float] = 0.7
+    top_p: Optional[float] = 1.0
+    top_k: Optional[int] = None
+    stop_sequences: Optional[List[str]] = None
+    stream: Optional[bool] = False
+    tools: Optional[List[ClaudeToolDefinition]] = None
+
+class ClaudeUsage(BaseModel):
+    input_tokens: int
+    output_tokens: int
+
+class ClaudeResponse(BaseModel):
+    id: str = Field(default_factory=lambda: f"msg_{uuid.uuid4()}")
+    type: str = "message"
+    role: str = "assistant"
+    content: List[Union[Dict[str, Any], ClaudeToolUse]]
+    model: str
+    stop_reason: Optional[str] = None
+    stop_sequence: Optional[str] = None
+    usage: ClaudeUsage
+
+class ClaudeStreamEvent(BaseModel):
+    type: str
+    message: Optional[ClaudeResponse] = None
+    content_block: Optional[Dict[str, Any]] = None
+    delta: Optional[Dict[str, Any]] = None
+    usage: Optional[ClaudeUsage] = None
+
 # Authentication
 async def verify_api_key(authorization: str = Header(None)):
     if not authorization:
@@ -256,6 +320,109 @@ class TokenManager:
         return self.access_token
 
 token_manager = TokenManager()
+
+# Claude API conversion functions
+def claude_to_openai_request(claude_request: ClaudeRequest) -> ChatCompletionRequest:
+    """Convert Claude API request to OpenAI format"""
+    messages = []
+    
+    # Add system message if present
+    if claude_request.system:
+        messages.append(ChatMessage(role="system", content=claude_request.system))
+    
+    # Convert Claude messages to OpenAI format
+    for msg in claude_request.messages:
+        if isinstance(msg.content, str):
+            messages.append(ChatMessage(role=msg.role, content=msg.content))
+        else:
+            # Handle content parts
+            content_parts = []
+            for part in msg.content:
+                if part.type == "text":
+                    content_parts.append(ContentPart(type="text", text=part.text))
+                elif part.type == "image" and part.source:
+                    # Convert Claude image format to OpenAI format
+                    if "data" in part.source:
+                        image_url = ImageUrl(url=f"data:image/jpeg;base64,{part.source['data']}")
+                        content_parts.append(ContentPart(type="image_url", image_url=image_url))
+                elif part.type == "tool_use":
+                    # Handle tool use in content
+                    pass
+            
+            if content_parts:
+                messages.append(ChatMessage(role=msg.role, content=content_parts))
+            else:
+                messages.append(ChatMessage(role=msg.role, content=""))
+    
+    # Convert tools if present
+    tools = None
+    if claude_request.tools:
+        tools = []
+        for tool in claude_request.tools:
+            tools.append(Tool(
+                type="function",
+                function=Function(
+                    name=tool.name,
+                    description=tool.description,
+                    parameters=tool.input_schema
+                )
+            ))
+    
+    return ChatCompletionRequest(
+        model=claude_request.model,
+        messages=messages,
+        max_tokens=claude_request.max_tokens,
+        temperature=claude_request.temperature,
+        top_p=claude_request.top_p,
+        stream=claude_request.stream,
+        stop=claude_request.stop_sequences,
+        tools=tools
+    )
+
+def openai_to_claude_response(openai_response: ChatCompletionResponse, original_model: str) -> ClaudeResponse:
+    """Convert OpenAI response to Claude format"""
+    content = []
+    
+    if openai_response.choices and len(openai_response.choices) > 0:
+        choice = openai_response.choices[0]
+        message = choice.message
+        
+        # Handle text content
+        if message.content:
+            content.append({"type": "text", "text": message.content})
+        
+        # Handle tool calls
+        if message.tool_calls:
+            for tool_call in message.tool_calls:
+                try:
+                    tool_input = json.loads(tool_call.function.get("arguments", "{}"))
+                except:
+                    tool_input = {}
+                
+                content.append(ClaudeToolUse(
+                    id=tool_call.id,
+                    name=tool_call.function.get("name", ""),
+                    input=tool_input
+                ))
+        
+        stop_reason = "end_turn"
+        if choice.finish_reason == "tool_calls":
+            stop_reason = "tool_use"
+        elif choice.finish_reason == "length":
+            stop_reason = "max_tokens"
+        elif choice.finish_reason == "stop":
+            stop_reason = "end_turn"
+    
+    return ClaudeResponse(
+        id=openai_response.id.replace("chatcmpl-", "msg_"),
+        content=content,
+        model=original_model,
+        stop_reason=stop_reason,
+        usage=ClaudeUsage(
+            input_tokens=openai_response.usage.prompt_tokens,
+            output_tokens=openai_response.usage.completion_tokens
+        )
+    )
 
 # XML Tool Call Parser (from version 1)
 def parse_xml_tool_calls(response_text: str) -> Optional[List[ToolCall]]:
@@ -1748,6 +1915,145 @@ async def create_streaming_response(request: ChatCompletionRequest):
             }
         )
 
+# Claude API endpoints
+@app.post("/v1/messages")
+async def create_claude_message(
+    request: ClaudeRequest,
+    api_key: str = Depends(verify_api_key)
+):
+    """Create a Claude message (Claude API compatible)"""
+    logger.info(f"📥 CLAUDE REQUEST: {request.model_dump_json(indent=2)}")
+    
+    # Validate model
+    if request.model not in MODEL_MAP:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "type": "invalid_request_error",
+                "message": f"The model '{request.model}' does not exist or you do not have access to it."
+            }
+        )
+    
+    # Convert Claude request to OpenAI format
+    openai_request = claude_to_openai_request(request)
+    
+    if request.stream:
+        # Handle streaming response
+        return await create_claude_streaming_response(request, openai_request)
+    else:
+        # Handle non-streaming response
+        openai_response = await create_non_streaming_response(openai_request)
+        claude_response = openai_to_claude_response(openai_response, request.model)
+        return claude_response
+
+async def create_claude_streaming_response(claude_request: ClaudeRequest, openai_request: ChatCompletionRequest):
+    """Create Claude streaming response"""
+    async def generate_claude_stream():
+        try:
+            # Get OpenAI streaming response
+            openai_response = await create_non_streaming_response(openai_request)
+            
+            # Convert to Claude streaming format
+            response_id = f"msg_{uuid.uuid4()}"
+            
+            # Send message_start event
+            start_event = ClaudeStreamEvent(
+                type="message_start",
+                message=ClaudeResponse(
+                    id=response_id,
+                    content=[],
+                    model=claude_request.model,
+                    usage=ClaudeUsage(input_tokens=0, output_tokens=0)
+                )
+            )
+            yield f"event: message_start\ndata: {start_event.model_dump_json(exclude_none=True)}\n\n"
+            
+            if openai_response.choices and len(openai_response.choices) > 0:
+                choice = openai_response.choices[0]
+                message = choice.message
+                
+                # Send content_block_start for text
+                if message.content:
+                    content_start = ClaudeStreamEvent(
+                        type="content_block_start",
+                        content_block={"type": "text", "text": ""}
+                    )
+                    yield f"event: content_block_start\ndata: {content_start.model_dump_json(exclude_none=True)}\n\n"
+                    
+                    # Send content in chunks
+                    text = message.content
+                    chunk_size = 50
+                    for i in range(0, len(text), chunk_size):
+                        chunk = text[i:i + chunk_size]
+                        delta_event = ClaudeStreamEvent(
+                            type="content_block_delta",
+                            delta={"type": "text_delta", "text": chunk}
+                        )
+                        yield f"event: content_block_delta\ndata: {delta_event.model_dump_json(exclude_none=True)}\n\n"
+                    
+                    # Send content_block_stop
+                    stop_event = ClaudeStreamEvent(type="content_block_stop")
+                    yield f"event: content_block_stop\ndata: {stop_event.model_dump_json(exclude_none=True)}\n\n"
+                
+                # Handle tool calls
+                if message.tool_calls:
+                    for tool_call in message.tool_calls:
+                        try:
+                            tool_input = json.loads(tool_call.function.get("arguments", "{}"))
+                        except:
+                            tool_input = {}
+                        
+                        # Send tool use content block
+                        tool_start = ClaudeStreamEvent(
+                            type="content_block_start",
+                            content_block={
+                                "type": "tool_use",
+                                "id": tool_call.id,
+                                "name": tool_call.function.get("name", ""),
+                                "input": tool_input
+                            }
+                        )
+                        yield f"event: content_block_start\ndata: {tool_start.model_dump_json(exclude_none=True)}\n\n"
+                        
+                        tool_stop = ClaudeStreamEvent(type="content_block_stop")
+                        yield f"event: content_block_stop\ndata: {tool_stop.model_dump_json(exclude_none=True)}\n\n"
+            
+            # Send message_delta with usage
+            usage_event = ClaudeStreamEvent(
+                type="message_delta",
+                delta={"stop_reason": "end_turn"},
+                usage=ClaudeUsage(
+                    input_tokens=openai_response.usage.prompt_tokens,
+                    output_tokens=openai_response.usage.completion_tokens
+                )
+            )
+            yield f"event: message_delta\ndata: {usage_event.model_dump_json(exclude_none=True)}\n\n"
+            
+            # Send message_stop
+            stop_event = ClaudeStreamEvent(type="message_stop")
+            yield f"event: message_stop\ndata: {stop_event.model_dump_json(exclude_none=True)}\n\n"
+            
+        except Exception as e:
+            logger.error(f"❌ Claude streaming response failed: {str(e)}")
+            error_event = {
+                "type": "error",
+                "error": {
+                    "type": "api_error",
+                    "message": str(e)
+                }
+            }
+            yield f"event: error\ndata: {json.dumps(error_event)}\n\n"
+    
+    return StreamingResponse(
+        generate_claude_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "Content-Type": "text/event-stream"
+        }
+    )
+
 @app.get("/health")
 async def health_check():
     """Health check endpoint"""
@@ -1758,11 +2064,16 @@ async def root():
     """Root endpoint with service information"""
     return {
         "service": "Ki2API",
-        "description": "OpenAI-compatible API for Claude Sonnet 4 via AWS CodeWhisperer",
+        "description": "OpenAI and Claude compatible API for Claude Sonnet 4 via AWS CodeWhisperer",
         "version": "3.0.1",
         "endpoints": {
-            "models": "/v1/models",
-            "chat": "/v1/chat/completions",
+            "openai": {
+                "models": "/v1/models",
+                "chat": "/v1/chat/completions"
+            },
+            "claude": {
+                "messages": "/v1/messages"
+            },
             "health": "/health"
         },
         "features": {
@@ -1772,8 +2083,11 @@ async def root():
             "xml_tool_parsing": True,
             "auto_token_refresh": True,
             "null_content_handling": True,
-            "tool_call_deduplication": True
-        }
+            "tool_call_deduplication": True,
+            "openai_compatible": True,
+            "claude_compatible": True
+        },
+        "supported_models": list(MODEL_MAP.keys())
     }
 
 if __name__ == "__main__":

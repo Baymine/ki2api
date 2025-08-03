@@ -1,15 +1,16 @@
-# Ki2API - Claude Sonnet 4 OpenAI兼容API
+# Ki2API - Claude Sonnet 4 OpenAI & Claude 兼容API
 
-一个简单易用的Docker化OpenAI兼容API服务，专门用于Claude Sonnet 4模型。
+一个简单易用的Docker化API服务，同时支持OpenAI和Claude API格式，专门用于Claude Sonnet 4模型。
 
 ## 功能特点
 
 - 🐳 **Docker傻瓜式运行** - 一行命令启动服务
 - 🔑 **固定API密钥** - 使用 `ki2api-key-2024`
-- 🎯 **单一模型** - 仅支持 `claude-sonnet-4-20250514`
-- 🌐 **OpenAI兼容** - 完全兼容OpenAI API格式
+- 🎯 **多模型支持** - 支持多个Claude模型
+- 🌐 **双API兼容** - 完全兼容OpenAI和Claude API格式
 - 📡 **流式传输** - 支持SSE流式响应
 - 🔄 **自动token刷新** - 支持token过期自动刷新
+- 🛠️ **工具调用** - 支持function calling
 
 ## 快速开始
 
@@ -31,19 +32,21 @@ docker-compose up -d
 
 ### 3. 测试API
 
-#### 获取模型列表
+#### OpenAI API 格式
+
+##### 获取模型列表
 ```bash
 curl -H "Authorization: Bearer ki2api-key-2024" \
      http://localhost:8989/v1/models
 ```
 
-#### 非流式对话
+##### 非流式对话
 ```bash
 curl -X POST http://localhost:8989/v1/chat/completions \
   -H "Authorization: Bearer ki2api-key-2024" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-3-5-sonnet-20241022",
     "messages": [
       {"role": "user", "content": "你好，请介绍一下自己"}
     ],
@@ -51,18 +54,64 @@ curl -X POST http://localhost:8989/v1/chat/completions \
   }'
 ```
 
-#### 流式对话
+##### 流式对话
 ```bash
 curl -X POST http://localhost:8989/v1/chat/completions \
   -H "Authorization: Bearer ki2api-key-2024" \
   -H "Content-Type: application/json" \
   -d '{
-    "model": "claude-sonnet-4-20250514",
+    "model": "claude-3-5-sonnet-20241022",
     "messages": [
       {"role": "user", "content": "写一首关于春天的诗"}
     ],
     "stream": true,
     "max_tokens": 500
+  }'
+```
+
+#### Claude API 格式
+
+##### 非流式对话
+```bash
+curl -X POST http://localhost:8989/v1/messages \
+  -H "Authorization: Bearer ki2api-key-2024" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet-20241022",
+    "max_tokens": 1000,
+    "messages": [
+      {"role": "user", "content": "你好，请介绍一下自己"}
+    ]
+  }'
+```
+
+##### 流式对话
+```bash
+curl -X POST http://localhost:8989/v1/messages \
+  -H "Authorization: Bearer ki2api-key-2024" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet-20241022",
+    "max_tokens": 1000,
+    "messages": [
+      {"role": "user", "content": "写一首关于春天的诗"}
+    ],
+    "stream": true
+  }'
+```
+
+##### 带系统提示的对话
+```bash
+curl -X POST http://localhost:8989/v1/messages \
+  -H "Authorization: Bearer ki2api-key-2024" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "claude-3-5-sonnet-20241022",
+    "max_tokens": 1000,
+    "system": "你是一个专业的AI助手，请用简洁明了的方式回答问题。",
+    "messages": [
+      {"role": "user", "content": "什么是机器学习？"}
+    ]
   }'
 ```
 
@@ -96,14 +145,58 @@ docker run -d \
 
 ## API端点
 
-### GET /v1/models
-获取可用模型列表
+### OpenAI 兼容端点
 
-### POST /v1/chat/completions
-创建聊天完成
+#### 1. 获取模型列表
+- **端点**: `GET /v1/models`
+- **描述**: 获取可用模型列表
+- **认证**: 需要API密钥
 
-### GET /health
-健康检查端点
+#### 2. 聊天完成
+- **端点**: `POST /v1/chat/completions`
+- **描述**: 创建聊天完成（OpenAI格式）
+- **认证**: 需要API密钥
+- **支持**: 流式和非流式响应
+
+### Claude 兼容端点
+
+#### 3. 消息创建
+- **端点**: `POST /v1/messages`
+- **描述**: 创建消息（Claude格式）
+- **认证**: 需要API密钥
+- **支持**: 流式和非流式响应
+- **特性**: 支持系统提示、工具调用、图片输入
+
+### 通用端点
+
+#### 4. 健康检查
+- **端点**: `GET /health`
+- **描述**: 服务健康状态检查
+- **认证**: 不需要
+
+#### 5. 服务信息
+- **端点**: `GET /`
+- **描述**: 获取服务信息和支持的功能
+- **认证**: 不需要
+
+## 支持的模型
+
+本服务支持以下Claude模型：
+
+| 模型名称 | 描述 | 支持的API |
+|---------|------|----------|
+| `claude-3-5-sonnet-20241022` | Claude 3.5 Sonnet (最新版本) | OpenAI & Claude |
+| `claude-3-5-sonnet-20240620` | Claude 3.5 Sonnet (旧版本) | OpenAI & Claude |
+| `claude-3-sonnet-20240229` | Claude 3 Sonnet | OpenAI & Claude |
+| `claude-3-haiku-20240307` | Claude 3 Haiku | OpenAI & Claude |
+| `claude-sonnet-4-20250514` | Claude Sonnet 4 (内部版本) | OpenAI & Claude |
+
+所有模型都支持：
+- 文本对话
+- 流式响应
+- 工具调用（Function Calling）
+- 图片输入（Vision）
+- 系统提示
 
 ## 环境变量
 
