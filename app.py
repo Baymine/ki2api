@@ -11,8 +11,9 @@ import struct
 import base64
 import copy
 from fastapi import FastAPI, HTTPException, Request, Header, Depends
-from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field, ValidationError
 from typing import List, Optional, Dict, Any, Union
 from dotenv import load_dotenv
 from json_repair import repair_json
@@ -53,6 +54,47 @@ async def log_requests(request: Request, call_next):
     logger.info("🏁 ===== REQUEST COMPLETED =====")
     
     return response
+
+# Add exception handlers for better error debugging
+@app.exception_handler(RequestValidationError)
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
+    logger.error("🚨 ===== VALIDATION ERROR =====")
+    logger.error(f"📍 Request URL: {request.url}")
+    logger.error(f"📋 Request method: {request.method}")
+    logger.error(f"❌ Validation errors: {exc.errors()}")
+    logger.error(f"📄 Request body: {await request.body()}")
+    
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "message": "Request validation failed",
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "validation_error"
+            },
+            "validation_errors": exc.errors()
+        }
+    )
+
+@app.exception_handler(ValidationError)
+async def pydantic_validation_exception_handler(request: Request, exc: ValidationError):
+    logger.error("🚨 ===== PYDANTIC VALIDATION ERROR =====")
+    logger.error(f"📍 Request URL: {request.url}")
+    logger.error(f"❌ Pydantic errors: {exc.errors()}")
+    
+    return JSONResponse(
+        status_code=422,
+        content={
+            "error": {
+                "message": "Data validation failed",
+                "type": "invalid_request_error",
+                "param": None,
+                "code": "pydantic_validation_error"
+            },
+            "validation_errors": exc.errors()
+        }
+    )
 
 # Configuration
 API_KEY = os.getenv("API_KEY", "ki2api-key-2024")
@@ -1960,23 +2002,30 @@ async def create_claude_message(
     api_key: str = Depends(verify_api_key)
 ):
     """Create a Claude message (Claude API compatible)"""
-    logger.info("🚀 ===== CLAUDE API REQUEST STARTED =====")
-    logger.info(f"📍 Endpoint: POST /v1/messages")
-    logger.info(f"🔑 API Key verified: {api_key}")
-    logger.info(f"📥 CLAUDE REQUEST: {request.model_dump_json(indent=2)}")
-    logger.info(f"🎯 Requested model: {request.model}")
-    logger.info(f"📋 Available models: {list(MODEL_MAP.keys())}")
-    
-    # Validate model
-    if request.model not in MODEL_MAP:
-        logger.error(f"❌ Invalid model requested: {request.model}")
-        raise HTTPException(
-            status_code=400,
-            detail={
-                "type": "invalid_request_error",
-                "message": f"The model '{request.model}' does not exist or you do not have access to it."
-            }
-        )
+    try:
+        logger.info("🚀 ===== CLAUDE API REQUEST STARTED =====")
+        logger.info(f"📍 Endpoint: POST /v1/messages")
+        logger.info(f"🔑 API Key verified: {api_key}")
+        logger.info(f"📥 CLAUDE REQUEST: {request.model_dump_json(indent=2)}")
+        logger.info(f"🎯 Requested model: {request.model}")
+        logger.info(f"📋 Available models: {list(MODEL_MAP.keys())}")
+        
+        # Validate model
+        if request.model not in MODEL_MAP:
+            logger.error(f"❌ Invalid model requested: {request.model}")
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "type": "invalid_request_error",
+                    "message": f"The model '{request.model}' does not exist or you do not have access to it."
+                }
+            )
+    except Exception as e:
+        logger.error(f"❌ Request validation failed: {str(e)}")
+        logger.error(f"❌ Exception type: {type(e)}")
+        import traceback
+        logger.error(f"❌ Traceback: {traceback.format_exc()}")
+        raise
     
     # Convert Claude request to OpenAI format
     openai_request = claude_to_openai_request(request)
